@@ -1,11 +1,27 @@
 {#-
   Create or update a materialized view in ClickHouse.
   This involves creating both the materialized view itself and a
-  target table that the materialized view writes to.
+  target table that the materialized view writes to unless a target table is provided.
 -#}
 {%- materialization materialized_view, adapter='clickhouse' -%}
 
-  {%- set target_relation = this.incorporate(type='table') -%}
+  {%- set target_table_param = config.get('target_table') -%}
+  {%- set target_schema_param = config.get('target_schema', this.schema) -%}
+
+  {#- Use default relation if target_table_param is not provided -#}
+  {%- if target_table_param is none -%}
+    {%- set target_relation = this.incorporate(type='table') -%}
+  {%- else -%}
+    {%- set target_relation = adapter.get_relation(
+            database=this.database,
+            schema=target_schema_param,
+            identifier=target_table_param
+        ) -%}
+    {%- if target_relation is none -%}
+      {{ exceptions.raise_compiler_error("Target table '" ~ target_schema_param ~ "." ~ target_table_param ~ "' does not exist.") }}
+    {%- endif -%}
+  {%- endif -%}
+
   {%- set mv_relation = target_relation.derivative('_mv', 'materialized_view') -%}
   {%- set cluster_clause = on_cluster_clause(target_relation) -%}
 
@@ -14,13 +30,18 @@
   {%- set backup_relation = none -%}
   {%- set preexisting_backup_relation = none -%}
   {%- set preexisting_intermediate_relation = none -%}
-  {% if existing_relation is not none %}
-    {%- set backup_relation_type = existing_relation.type -%}
-    {%- set backup_relation = make_backup_relation(target_relation, backup_relation_type) -%}
-    {%- set preexisting_backup_relation = load_cached_relation(backup_relation) -%}
-    {% if not existing_relation.can_exchange %}
-      {%- set intermediate_relation =  make_intermediate_relation(target_relation) -%}
-      {%- set preexisting_intermediate_relation = load_cached_relation(intermediate_relation) -%}
+  {%- if target_relation is not none %}
+    {%- set existing_relation = load_cached_relation(target_relation) -%}
+    {%- set backup_relation = none -%}
+    {%- set intermediate_relation = none -%}
+
+    {% if existing_relation is not none %}
+      {%- set backup_relation_type = existing_relation.type -%}
+      {%- set backup_relation = make_backup_relation(target_relation, backup_relation_type) -%}
+
+      {% if not existing_relation.can_exchange %}
+        {%- set intermediate_relation = make_intermediate_relation(target_relation) -%}
+      {% endif %}
     {% endif %}
   {% endif %}
 
@@ -38,7 +59,7 @@
   {% if backup_relation is none %}
     {{ log('Creating new materialized view ' + target_relation.name )}}
     {% call statement('main') -%}
-      {{ clickhouse__get_create_materialized_view_as_sql(target_relation, sql) }}
+      {{ clickhouse__get_create_materialized_view_as_sql(target_relation, sql, target_table_param) }}
     {%- endcall %}
   {% elif existing_relation.can_exchange %}
     {{ log('Replacing existing materialized view ' + target_relation.name) }}
@@ -82,17 +103,18 @@
 
 {%- endmaterialization -%}
 
-
 {#
   There are two steps to creating a materialized view:
   1. Create a new table based on the SQL in the model
   2. Create a materialized view using the SQL in the model that inserts
   data into the table creating during step 1
 #}
-{% macro clickhouse__get_create_materialized_view_as_sql(relation, sql) -%}
-  {% call statement('create_target_table') %}
-    {{ get_create_table_as_sql(False, relation, sql) }}
-  {% endcall %}
+{% macro clickhouse__get_create_materialized_view_as_sql(relation, sql, target_table_param=None) -%}
+  {%- if target_table_param is none %}
+    {% call statement('create_target_table') %}
+      {{ get_create_table_as_sql(False, relation, sql) }}
+    {% endcall %}
+  {%- endif %}
   {%- set cluster_clause = on_cluster_clause(relation) -%}
   {%- set mv_relation = relation.derivative('_mv', 'materialized_view') -%}
   {{ clickhouse__create_mv_sql(mv_relation, relation, cluster_clause, sql) }}
