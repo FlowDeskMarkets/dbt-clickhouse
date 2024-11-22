@@ -85,6 +85,7 @@ class ClickHouseRelation(BaseRelation):
                 materialized in ('view', 'dictionary')
                 or 'distributed' in materialized
                 or 'Replicated' in engine
+                or engine in ('Null')
             )
 
         else:
